@@ -4168,7 +4168,13 @@ static int sessionChangesetInvert(
 
     /* Test for EOF. */
     if( (rc = sessionInputBuffer(pInput, 2)) ) goto finished_invert;
-    if( pInput->iNext>=pInput->nData ) break;
+    if( pInput->iNext+1>=pInput->nData ){
+      if( pInput->iNext!=pInput->nData ){ 
+        rc = SQLITE_CORRUPT_BKPT; 
+        goto finished_invert;
+      }
+      break;
+    }
     eType = pInput->aData[pInput->iNext];
 
     switch( eType ){
@@ -5482,6 +5488,7 @@ static int sessionRetryConstraints(
     rc = sessionRetryIterInit(
         &pApply->constraints, bPatchset, zTab, pApply, &pUp
     );
+<<<<<<< HEAD
 
     sqlite3_free(cons.aBuf);
     if( rc!=SQLITE_OK ) break;
@@ -5500,6 +5507,8 @@ static int sessionRetryConstraints(
     rc = sessionRetryIterInit(
         &pApply->constraints, bPatchset, zTab, pApply, &pUp
     );
+=======
+>>>>>>> version-3.53.2
     if( rc==SQLITE_OK ){
       int iThis = -1;
       while( SQLITE_ROW==sqlite3changeset_next(pUp) ){
@@ -7432,7 +7441,7 @@ int sqlite3changegroup_change_blob(
   const void *pVal, 
   int nVal
 ){
-  sqlite3_int64 nByte = 1 + sessionVarintLen(nVal) + nVal;
+  sqlite3_int64 nByte = 1 + sessionVarintLen(nVal) + (i64)nVal;
   int rc = SQLITE_OK;
   SessionBuffer *pBuf = 0;
 
