@@ -346,9 +346,7 @@ static int sessionVarintLen(int iVal){
 ** bytes read.
 */
 static int sessionVarintGet(const u8 *aBuf, int *piVal){
-  int ret = getVarint32(aBuf, *piVal);
-  *piVal = (*piVal & 0x7FFFFFFF);
-  return ret;
+  return getVarint32(aBuf, *piVal);
 }
 
 /*
@@ -363,7 +361,7 @@ static int sessionVarintGetSafe(const u8 *aBuf, int nBuf, int *piVal){
     memcpy(aCopy, aBuf, nBuf);
     aRead = aCopy;
   }
-  return sessionVarintGet(aRead, piVal);
+  return getVarint32(aRead, *piVal);
 }
 
 /* Load an unaligned and unsigned 32-bit integer */
@@ -3705,21 +3703,17 @@ static int sessionChangesetBufferRecord(
     int eType;
     rc = sessionInputBuffer(pIn, nByte + 10);
     if( rc==SQLITE_OK ){
-      if( pIn->iNext+nByte>=pIn->nData ){
+      eType = pIn->aData[pIn->iNext + nByte++];
+      if( eType==SQLITE_TEXT || eType==SQLITE_BLOB ){
+        int n;
+        int nRem = pIn->nData - (pIn->iNext + nByte);
+        nByte += sessionVarintGetSafe(&pIn->aData[pIn->iNext+nByte], nRem, &n);
+        nByte += n;
+        rc = sessionInputBuffer(pIn, nByte);
+      }else if( eType==SQLITE_INTEGER || eType==SQLITE_FLOAT ){
+        nByte += 8;
+      }else if( eType!=0 && eType!=SQLITE_NULL ){
         rc = SQLITE_CORRUPT_BKPT;
-      }else{
-        eType = pIn->aData[pIn->iNext + nByte++];
-        if( eType==SQLITE_TEXT || eType==SQLITE_BLOB ){
-          int n;
-          int nRem = pIn->nData - (pIn->iNext + nByte);
-          nByte += sessionVarintGetSafe(&pIn->aData[pIn->iNext+nByte], nRem,&n);
-          nByte += n;
-          rc = sessionInputBuffer(pIn, nByte);
-        }else if( eType==SQLITE_INTEGER || eType==SQLITE_FLOAT ){
-          nByte += 8;
-        }else if( eType!=0 && eType!=SQLITE_NULL ){
-          rc = SQLITE_CORRUPT_BKPT;
-        }
       }
     }
     if( rc==SQLITE_OK && (pIn->iNext+nByte)>pIn->nData ){
@@ -4168,7 +4162,13 @@ static int sessionChangesetInvert(
 
     /* Test for EOF. */
     if( (rc = sessionInputBuffer(pInput, 2)) ) goto finished_invert;
-    if( pInput->iNext>=pInput->nData ) break;
+    if( pInput->iNext+1>=pInput->nData ){
+      if( pInput->iNext!=pInput->nData ){ 
+        rc = SQLITE_CORRUPT_BKPT; 
+        goto finished_invert;
+      }
+      break;
+    }
     eType = pInput->aData[pInput->iNext];
 
     switch( eType ){
@@ -5474,24 +5474,6 @@ static int sessionRetryConstraints(
 
   /* Step (2) */
   while( rc==SQLITE_OK && pApply->constraints.nBuf && !pApply->bNoUpdateLoop ){
-    SessionBuffer cons = {0, 0, 0};
-    sqlite3_changeset_iter *pUp = 0;
-    sqlite3_stmt *pInsert = 0;
-    int iSkip = 0;
-
-    rc = sessionRetryIterInit(
-        &pApply->constraints, bPatchset, zTab, pApply, &pUp
-    );
-
-    sqlite3_free(cons.aBuf);
-    if( rc!=SQLITE_OK ) break;
-
-    /* If no progress has been made this round, break out of the loop. */
-    if( pApply->constraints.nBuf>=cons.nBuf ) break;
-  }
-
-  /* Step (2) */
-  while( rc==SQLITE_OK && pApply->constraints.nBuf ){
     SessionBuffer cons = {0, 0, 0};
     sqlite3_changeset_iter *pUp = 0;
     sqlite3_stmt *pInsert = 0;
@@ -7405,7 +7387,7 @@ int sqlite3changegroup_change_text(
   const char *pVal, 
   int nVal
 ){
-  sqlite3_int64 nText = nVal>=0 ? nVal : strlen(pVal);
+  int nText = nVal>=0 ? nVal : strlen(pVal);
   sqlite3_int64 nByte = 1 + sessionVarintLen(nText) + nText;
   int rc = SQLITE_OK;
   SessionBuffer *pBuf = 0;
@@ -7432,7 +7414,7 @@ int sqlite3changegroup_change_blob(
   const void *pVal, 
   int nVal
 ){
-  sqlite3_int64 nByte = 1 + sessionVarintLen(nVal) + nVal;
+  sqlite3_int64 nByte = 1 + sessionVarintLen(nVal) + (i64)nVal;
   int rc = SQLITE_OK;
   SessionBuffer *pBuf = 0;
 
@@ -7457,7 +7439,6 @@ int sqlite3changegroup_change_finish(
   char **pzErr
 ){
   int rc = SQLITE_OK;
-  char *zErr = 0;
   if( pGrp->cd.pTab ){
     SessionBuffer *aBuf = pGrp->cd.aBuf;
     int ii;
@@ -7469,14 +7450,14 @@ int sqlite3changegroup_change_finish(
         for(ii=0; ii<nBuf; ii++){
           if( pGrp->cd.pTab->abPK[ii] ){
             if( aBuf[ii].nBuf<=1 ){
-              zErr = sqlite3_mprintf(
+              *pzErr = sqlite3_mprintf(
                   "invalid change: %s value in PK of old.* record",
                   aBuf[ii].nBuf==1 ? "null" : "undefined"
               );
               rc = SQLITE_ERROR;
               break;
             }else if( aBuf[ii + nBuf].nBuf>0 ){
-              zErr = sqlite3_mprintf(
+              *pzErr = sqlite3_mprintf(
                   "invalid change: defined value in PK of new.* record"
               );
               rc = SQLITE_ERROR;
@@ -7484,7 +7465,7 @@ int sqlite3changegroup_change_finish(
             }
           }else 
           if( pGrp->bPatch==0 && (aBuf[ii].nBuf>0)!=(aBuf[ii+nBuf].nBuf>0) ){
-            zErr = sqlite3_mprintf(
+            *pzErr = sqlite3_mprintf(
                 "invalid change: column %d "
                 "- old.* value is %sdefined but new.* is %sdefined",
                 ii, aBuf[ii].nBuf ? "" : "un", aBuf[ii+nBuf].nBuf ? "" : "un"
@@ -7501,14 +7482,14 @@ int sqlite3changegroup_change_finish(
           if( (pGrp->cd.eOp==SQLITE_INSERT || pGrp->bPatch==0 || isPK)
            && aBuf[ii].nBuf==0
           ){
-            zErr = sqlite3_mprintf(
+            *pzErr = sqlite3_mprintf(
                 "invalid change: column %d is undefined", ii
             );
             rc = SQLITE_ERROR;
             break;
           }
           if( aBuf[ii].nBuf==1 && isPK ){
-            zErr = sqlite3_mprintf(
+            *pzErr = sqlite3_mprintf(
                 "invalid change: null value in PK"
             );
             rc = SQLITE_ERROR;
@@ -7558,11 +7539,6 @@ int sqlite3changegroup_change_finish(
     pGrp->cd.pTab = 0;
   }
 
-  if( pzErr ){
-    *pzErr = zErr;
-  }else{
-    sqlite3_free(zErr);
-  }
   return rc;
 }
 
