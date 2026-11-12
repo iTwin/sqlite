@@ -804,4 +804,46 @@ db2 close
 }]
 }
 
+foreach type {changeset patchset} {
+  foreach indirect {0 1} {
+    reset_db
+    sqlite3 db2 :memory:
+    do_common_sql {
+      CREATE TABLE t1(a INTEGER PRIMARY KEY, b);
+      INSERT INTO t1 VALUES(1, 'one'), (2, 'two');
+    }
+
+    sqlite3session S db main
+    S attach t1
+    S indirect $indirect
+    execsql {
+      UPDATE t1 SET b='ONE' WHERE a=1;
+      DELETE FROM t1 WHERE a=2;
+      INSERT INTO t1 VALUES(3, 'three');
+    }
+    set C [S $type]
+    S delete
+
+    sqlite3session S db2 main
+    S attach t1
+    do_test 16.$type.$indirect.1 {
+      sqlite3changeset_apply db2 $C ""
+      execsql { SELECT * FROM t1 ORDER BY a } db2
+    } {1 ONE 3 three}
+    do_test 16.$type.$indirect.2 {
+      set changes [list]
+      sqlite3session_foreach c [S changeset] {
+        lappend changes $c
+      }
+      lsort $changes
+    } [lsort [list \
+      [list DELETE t1 $indirect X. {i 2 t two} {}] \
+      [list INSERT t1 $indirect X. {} {i 3 t three}] \
+      [list UPDATE t1 $indirect X. {i 1 t one} {{} {} t ONE}] \
+    ]]
+    S delete
+    db2 close
+  }
+}
+
 finish_test
